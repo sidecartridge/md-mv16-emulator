@@ -40,30 +40,33 @@ else()
     message(FATAL_ERROR "Unknown BOARD_TYPE: ${BOARD_TYPE}")
 endif()
 
-# Add the env variable FATFS_SDK_PATH if it does not exist
-if(NOT DEFINED ENV{FATFS_SDK_PATH})
-    set(ENV{FATFS_SDK_PATH} ../../fatfs-sdk)
-endif()
-# Show the value
-message("FATFS_SDK_PATH: $ENV{FATFS_SDK_PATH}")
+# Resolve bundled Pico dependencies relative to the repo root so configure
+# works regardless of the active build directory.
+get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." REALPATH)
+set(DEFAULT_PICO_SDK_PATH "${REPO_ROOT}/pico-sdk")
+set(DEFAULT_PICO_EXTRAS_PATH "${REPO_ROOT}/pico-extras")
 
-# Add the env variable PICO_SDK_PATH if it does not exist
-if(NOT DEFINED ENV{PICO_SDK_PATH})
-    set(ENV{PICO_SDK_PATH} ../../pico-sdk)
+if(NOT DEFINED ENV{PICO_SDK_PATH} OR "$ENV{PICO_SDK_PATH}" STREQUAL "")
+    set(ENV{PICO_SDK_PATH} "${DEFAULT_PICO_SDK_PATH}")
 endif()
-# Show the value
-message("PICO_SDK_PATH: $ENV{PICO_SDK_PATH}")
+set(PICO_SDK_PATH "$ENV{PICO_SDK_PATH}" CACHE PATH "Path to the Raspberry Pi Pico SDK" FORCE)
+get_filename_component(PICO_SDK_PATH "${PICO_SDK_PATH}" REALPATH BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+set(PICO_SDK_PATH "${PICO_SDK_PATH}" CACHE PATH "Path to the Raspberry Pi Pico SDK" FORCE)
+set(ENV{PICO_SDK_PATH} "${PICO_SDK_PATH}")
+message("PICO_SDK_PATH: ${PICO_SDK_PATH}")
 
-# Add the env variable PICO_EXTRAS_PATH if it does not exist
-if(NOT DEFINED ENV{PICO_EXTRAS_PATH})
-    set(ENV{PICO_EXTRAS_PATH} ../../pico-extras)
+if(NOT DEFINED ENV{PICO_EXTRAS_PATH} OR "$ENV{PICO_EXTRAS_PATH}" STREQUAL "")
+    set(ENV{PICO_EXTRAS_PATH} "${DEFAULT_PICO_EXTRAS_PATH}")
 endif()
-# Show the value
-message("PICO_EXTRAS_PATH: $ENV{PICO_EXTRAS_PATH}")
+set(PICO_EXTRAS_PATH "$ENV{PICO_EXTRAS_PATH}" CACHE PATH "Path to the PICO EXTRAS" FORCE)
+get_filename_component(PICO_EXTRAS_PATH "${PICO_EXTRAS_PATH}" REALPATH BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+set(PICO_EXTRAS_PATH "${PICO_EXTRAS_PATH}" CACHE PATH "Path to the PICO EXTRAS" FORCE)
+set(ENV{PICO_EXTRAS_PATH} "${PICO_EXTRAS_PATH}")
+message("PICO_EXTRAS_PATH: ${PICO_EXTRAS_PATH}")
 
 # Include build functions from Pico SDK
-include($ENV{PICO_SDK_PATH}/pico_sdk_init.cmake)
-include($ENV{PICO_EXTRAS_PATH}/external/pico_extras_import.cmake)
+include(${PICO_SDK_PATH}/pico_sdk_init.cmake)
+include(${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake)
 
 # Set name of project (as PROJECT_NAME) and C/C   standards
 project(rp C CXX)
@@ -76,32 +79,26 @@ add_subdirectory(settings)
 # Add u8g2 library
 add_subdirectory(u8g2)
 
-# Add HTTP client library
-add_subdirectory(httpc)
-
-# Tell CMake where to find other source code
-add_subdirectory($ENV{FATFS_SDK_PATH}/src build)
-  
 # Tell CMake where to find the executable source file
 add_executable(${PROJECT_NAME} 
         main.c
 )
 
 pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/romemul.pio)
+pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/romaddr.pio)
 
 target_sources(${PROJECT_NAME} PRIVATE
+        btstack_cyw43_no_flash.c
+        a2dp.c
         aconfig.c
         blink.c
         display.c
         display_term.c
-        download.c
         emul.c
         gconfig.c
-        hw_config.c
-        network.c
         reset.c
+        romaddr.c
         romemul.c
-        sdcard.c
         select.c
         term.c
         tprotocol.c
@@ -114,10 +111,8 @@ pico_add_extra_outputs(${PROJECT_NAME})
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ${LINK_LIBRARIES}        # External or additional libraries passed as variables
     hardware_flash           # Flash memory access
-    no-OS-FatFS-SD-SDIO-SPI-RPi-Pico                # FATFS library   
     pico_stdlib              # Core functionality
     pico_multicore          # Multicore support
-    httpc                    # HTTP client
     settings                 # Custom settings library
     u8g2                     # for display
 )
@@ -126,8 +121,25 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 if (PICO_CYW43_SUPPORTED)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         pico_cyw43_arch_lwip_poll
-#        pico_cyw43_arch_lwip_threadsafe_background
         )
+
+    if (TARGET pico_btstack_classic AND
+        TARGET pico_btstack_hci_transport_cyw43 AND
+        TARGET pico_btstack_run_loop_async_context AND
+        TARGET pico_btstack_sbc_encoder)
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            pico_btstack_classic
+            pico_btstack_hci_transport_cyw43
+            pico_btstack_run_loop_async_context
+            pico_btstack_sbc_encoder
+        )
+        target_compile_definitions(${PROJECT_NAME} PRIVATE
+            A2DP_BTSTACK_ENABLED=1
+        )
+        message(STATUS "A2DP BTstack demo support enabled")
+    else()
+        message(WARNING "BTstack classic targets unavailable; A2DP demo command will be disabled")
+    endif()
 else()
     message(WARNING "CYW43 architecture not supported")
 endif()
@@ -183,7 +195,7 @@ if(NOT RELEASE_DATE)
 endif()
 
 if (NOT _DEBUG)
-        set(_DEBUG 1)
+        set(_DEBUG 0)
 endif()
 
 # Debug outputs
@@ -223,8 +235,10 @@ add_definitions(-D_DEBUG=${_DEBUG})
 # Device/Computer type
 add_definitions(-DDISPLAY_ATARIST)
 
-# We don't modify the flash in Core 1
-add_definitions(-DPICO_FLASH_ASSUME_CORE0_SAFE=1)
+# Core 1 is not used for flash operations in this app.
+# Mark core 1 as safe so flash-safe execution on core 0 won't require
+# multicore lockout initialization on the other core.
+add_definitions(-DPICO_FLASH_ASSUME_CORE1_SAFE=1)
 
 # Select HTTPS or HTTP downloads of the firmware
 add_definitions(-DAPP_DOWNLOAD_HTTPS=0)

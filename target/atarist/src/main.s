@@ -63,7 +63,6 @@ CMD_SET_SHARED_VAR		  equ 1							  ; This is a fake command to set the shared v
 APP_TERMINAL 				equ $0 ; The terminal app
 
 ; App terminal commands
-APP_TERMINAL_START   		equ $0 ; Start terminal command
 APP_TERMINAL_KEYSTROKE 		equ $1 ; Keystroke command
 
 _dskbufp                equ $4c6                            ; Address of the disk buffer pointer    
@@ -116,25 +115,18 @@ check_shift_keys	macro
 ; Check the keys pressed
 check_keys			macro
 
-					gemdos	Cconis,2		; Check if a key is pressed
-					tst.l d0
-					beq .\@no_key
+						gemdos	Cconis,2		; Check if a key is pressed
+						tst.l d0
+						beq .\@no_key
 
-					gemdos	Cnecin,2		; Read the key pressed
+						gemdos	Cnecin,2		; Read the key pressed
 
-					cmp.b #27, d0		; Check if the key is ESC
-					beq .\@esc_key	; If it is, send terminal command
-
-					move.l d0, d3
-					send_sync APP_TERMINAL_KEYSTROKE, 4
-
-					bra .\@no_key
-.\@esc_key:
-					send_sync APP_TERMINAL_START, 0
+						move.l d0, d3
+						send_sync APP_TERMINAL_KEYSTROKE, 4
 
 .\@no_key:
 
-					endm
+						endm
 
 check_commands		macro
 					move.l (FRAMEBUFFER_ADDR + FRAMEBUFFER_SIZE), d6	; Store in the D6 register the remote command value

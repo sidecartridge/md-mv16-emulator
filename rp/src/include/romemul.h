@@ -31,6 +31,8 @@
 // Function Prototypes
 int init_romemul(IRQInterceptionCallback requestCallback,
                  IRQInterceptionCallback responseCallback, bool copyFlashToRAM);
+void stop_romemul(void);
+void deinit_romemul(void);
 
 void dma_irqHandlerLookup(void);
 void dma_irqHandlerAddress(void);

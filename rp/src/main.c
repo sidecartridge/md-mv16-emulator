@@ -15,6 +15,7 @@
 #include "hardware/vreg.h"
 #include "pico/stdlib.h"
 #include "reset.h"
+#include "select.h"
 
 // This is the main.c file for the app or microfirmware. It is the entry point
 // for the application. It is the first file that is executed when the
@@ -133,6 +134,10 @@ int main() {
       settings_print(aconfig_getContext(), NULL);
       break;
   }
+
+  select_configure();
+  select_setResetCallback(reset_device);
+  select_setLongResetCallback(reset_deviceAndEraseFlash);
 
   // Start the application
   emul_start();

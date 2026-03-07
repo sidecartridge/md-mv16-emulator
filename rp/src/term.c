@@ -14,20 +14,15 @@
 #include <string.h>
 #include <time.h>
 
-#include "aconfig.h"
+#include "a2dp.h"
 #include "constants.h"
 #include "debug.h"
 #include "display.h"
 #include "display_term.h"
 #include "hardware/dma.h"
 #include "hardware/sync.h"
-#include "gconfig.h"
 #include "memfunc.h"
-#include "network.h"
-#include "reset.h"
 #include "romemul.h"
-#include "sdcard.h"
-#include "select.h"
 #include "tprotocol.h"
 
 static TransmissionProtocol protocolBuffers[2];
@@ -35,92 +30,12 @@ static volatile uint8_t protocolReadIndex = 0;
 static volatile uint8_t protocolWriteIndex = 1;
 static volatile bool protocolBufferReady = false;
 static volatile uint32_t protocolOverwriteCount = 0;
+static uint8_t lookupDmaChannelCached = 0u;
+static bool lookupDmaChannelCachedValid = false;
 
 static uint32_t memorySharedAddress = 0;
 static uint32_t memoryRandomTokenAddress = 0;
 static uint32_t memoryRandomTokenSeedAddress = 0;
-
-#define TERM_NETWORK_INFO_VALUE_SIZE 64
-#define TERM_MENU_LIVE_LINE_MAX 128
-
-static void term_getConfigValueOrNA(const char *key, char *buffer,
-                                    size_t bufferSize) {
-  if (bufferSize == 0) {
-    return;
-  }
-
-  buffer[0] = '\0';
-  SettingsConfigEntry *entry = settings_find_entry(gconfig_getContext(), key);
-  if ((entry != NULL) && (entry->value != NULL) && (entry->value[0] != '\0')) {
-    snprintf(buffer, bufferSize, "%s", entry->value);
-    return;
-  }
-
-  snprintf(buffer, bufferSize, "N/A");
-}
-
-#if defined(CYW43_WL_GPIO_LED_PIN)
-static void term_getIpStringOrNA(const ip_addr_t *address, char *buffer,
-                                 size_t bufferSize) {
-  if (bufferSize == 0) {
-    return;
-  }
-
-  if ((address == NULL) || ip_addr_isany(address)) {
-    snprintf(buffer, bufferSize, "N/A");
-    return;
-  }
-
-  const char *ipString = ipaddr_ntoa(address);
-  if ((ipString != NULL) && (ipString[0] != '\0')) {
-    snprintf(buffer, bufferSize, "%s", ipString);
-  } else {
-    snprintf(buffer, bufferSize, "N/A");
-  }
-}
-
-static void term_getConfiguredDns(char *dns1, size_t dns1Size, char *dns2,
-                                  size_t dns2Size) {
-  if (dns1Size > 0) {
-    snprintf(dns1, dns1Size, "N/A");
-  }
-  if (dns2Size > 0) {
-    snprintf(dns2, dns2Size, "N/A");
-  }
-
-  SettingsConfigEntry *entry =
-      settings_find_entry(gconfig_getContext(), PARAM_WIFI_DNS);
-  if ((entry == NULL) || (entry->value == NULL) || (entry->value[0] == '\0')) {
-    return;
-  }
-
-  char dnsValue[(TERM_NETWORK_INFO_VALUE_SIZE * 2) + 2] = {0};
-  snprintf(dnsValue, sizeof(dnsValue), "%s", entry->value);
-
-  char *dnsSecond = strchr(dnsValue, ',');
-  if (dnsSecond != NULL) {
-    *dnsSecond = '\0';
-    dnsSecond++;
-    while (*dnsSecond == ' ') {
-      dnsSecond++;
-    }
-  }
-
-  if ((dns1Size > 0) && (dnsValue[0] != '\0')) {
-    snprintf(dns1, dns1Size, "%s", dnsValue);
-  }
-
-  if ((dns2Size > 0) && (dnsSecond != NULL) && (dnsSecond[0] != '\0')) {
-    snprintf(dns2, dns2Size, "%s", dnsSecond);
-  }
-}
-#endif
-
-// Command handlers
-static void cmdClear(const char *arg);
-static void cmdExit(const char *arg);
-static void cmdHelp(const char *arg);
-static void cmdUnknown(const char *arg);
 
 // Command table
 static const Command *commands;
@@ -182,42 +97,69 @@ static inline void __not_in_flash_func(handle_protocol_checksum_error)(
           protocol->payload_size);
 }
 
+static inline bool __not_in_flash_func(term_get_lookup_dma_channel_isr)(
+    uint *lookupChannelOut) {
+  if (lookupChannelOut == NULL) {
+    return false;
+  }
+
+  if (__builtin_expect(lookupDmaChannelCachedValid, 1)) {
+    *lookupChannelOut = (uint)lookupDmaChannelCached;
+    return true;
+  }
+
+  int lookupChannel = romemul_getLookupDataRomDmaChannel();
+  if ((lookupChannel < 0) || ((uint)lookupChannel >= NUM_DMA_CHANNELS)) {
+    return false;
+  }
+
+  lookupDmaChannelCached = (uint8_t)lookupChannel;
+  lookupDmaChannelCachedValid = true;
+  *lookupChannelOut = (uint)lookupDmaChannelCached;
+  return true;
+}
+
 // Interrupt handler for DMA completion
 void __not_in_flash_func(term_dma_irq_handler_lookup)(void) {
-  int lookupChannel = romemul_getLookupDataRomDmaChannel();
-  if ((lookupChannel < 0) || (lookupChannel >= NUM_DMA_CHANNELS)) {
+  uint lookupChannel = 0u;
+  if (!term_get_lookup_dma_channel_isr(&lookupChannel)) {
     return;
   }
 
   // Read the rom3 signal and if so then process the command
-  dma_hw->ints1 = 1u << (uint)lookupChannel;
+  dma_hw->ints1 = 1u << lookupChannel;
 
   // Read once to avoid redundant hardware access
-  uint32_t addr = dma_hw->ch[(uint)lookupChannel].al3_read_addr_trig;
+  uint32_t addr = dma_hw->ch[lookupChannel].al3_read_addr_trig;
 
-  // Check ROM3 signal (bit 16)
-  // We expect that the ROM3 signal is not set very often, so this should help
-  // the compilar to run faster
-  if (__builtin_expect(addr & 0x00010000, 0)) {
-    // Invert highest bit of low word to get 16-bit address
-    uint16_t addr_lsb = (uint16_t)(addr ^ ADDRESS_HIGH_BIT);
-
-    tprotocol_parse(addr_lsb, handle_protocol_command,
+  // Check ROM3 signal (bit 16).
+  if (__builtin_expect(addr & 0x00010000u, 0)) {
+    // Invert highest bit of low word to get 16-bit address.
+    uint16_t addrLsb = (uint16_t)(addr ^ ADDRESS_HIGH_BIT);
+    tprotocol_parse(addrLsb, handle_protocol_command,
                     handle_protocol_checksum_error);
   }
+}
+
+void __not_in_flash_func(stream_dma_irq_handler_lookup)(void) {
+  uint lookupChannel = 0u;
+  if (!term_get_lookup_dma_channel_isr(&lookupChannel)) {
+    return;
+  }
+
+  dma_hw->ints1 = 1u << lookupChannel;
+  uint32_t addr = dma_hw->ch[lookupChannel].al3_read_addr_trig;
+
+  // Interpret lookup payload as unsigned 12-bit sample (0..4095) and map to
+  // signed PCM16 centered at 0.
+  uint16_t raw12 = (uint16_t)(addr & 0x1FFEu);
+  int16_t sample = (raw12 - 2048) << 3;
+  (void)a2dp_source_demo_pcm_write_mono(&sample, 1u);
 }
 
 static char screen[TERM_SCREEN_SIZE];
 static uint8_t cursorX = 0;
 static uint8_t cursorY = 0;
-
-static uint8_t menuRowSsid = 0;
-static uint8_t menuRowSelect = 0;
-static uint8_t menuRowSd = 0;
-static uint8_t menuPromptRow = 0;
-static uint8_t menuPromptCol = 0;
-static bool menuRowsValid = false;
-static bool menuPromptValid = false;
 
 // Store previous cursor position for block removal
 static uint8_t prevCursorX = 0;
@@ -226,17 +168,26 @@ static uint8_t prevCursorY = 0;
 // Buffer to keep track of chars entered between newlines
 static char inputBuffer[TERM_INPUT_BUFFER_SIZE];
 static size_t inputLength = 0;
+static term_raw_key_handler_t termRawKeyHandler = NULL;
 
-// Getter method for inputBuffer
-char *term_getInputBuffer(void) { return inputBuffer; }
+#define TERM_SCAN_1 0x02
+#define TERM_SCAN_0 0x0B
+#define TERM_SCAN_BACKSPACE 0x0E
+#define TERM_SCAN_ENTER 0x1C
+#define TERM_SCAN_C 0x2E
+#define TERM_SCAN_KP_7 0x67
+#define TERM_SCAN_KP_0 0x70
+#define TERM_SCAN_KP_ENTER 0x72
+
+void term_setRawKeyHandler(term_raw_key_handler_t handler) {
+  termRawKeyHandler = handler;
+}
 
 // Clears entire screen buffer and resets cursor
 void term_clearScreen(void) {
   memset(screen, 0, TERM_SCREEN_SIZE);
   cursorX = 0;
   cursorY = 0;
-  menuRowsValid = false;
-  menuPromptValid = false;
   display_termClear();
 }
 
@@ -454,6 +405,10 @@ void term_printString(const char *str) {
 // Called whenever a character is entered by the user
 // This is the single point of entry for user input
 static void termInputChar(char chr) {
+  if ((termRawKeyHandler != NULL) && termRawKeyHandler(chr)) {
+    return;
+  }
+
   // Check for backspace
   if (chr == '\b') {
     display_termChar(prevCursorX, prevCursorY, ' ');
@@ -539,7 +494,58 @@ static void termInputChar(char chr) {
   }
 }
 
+static char termNormalizeKeystroke(char keystroke, uint8_t scanCode) {
+  if (keystroke != 0) {
+    return keystroke;
+  }
+
+  if ((scanCode >= TERM_SCAN_1) && (scanCode <= TERM_SCAN_0)) {
+    if (scanCode == TERM_SCAN_0) {
+      return '0';
+    }
+    return (char)('1' + (scanCode - TERM_SCAN_1));
+  }
+
+  switch (scanCode) {
+    case 0x6D:
+      return '1';
+    case 0x6E:
+      return '2';
+    case 0x6F:
+      return '3';
+    case 0x6A:
+      return '4';
+    case 0x6B:
+      return '5';
+    case 0x6C:
+      return '6';
+    case TERM_SCAN_KP_7:
+      return '7';
+    case 0x68:
+      return '8';
+    case 0x69:
+      return '9';
+    case TERM_SCAN_KP_0:
+      return '0';
+    case TERM_SCAN_ENTER:
+    case TERM_SCAN_KP_ENTER:
+      return '\r';
+    case TERM_SCAN_BACKSPACE:
+      return '\b';
+    case TERM_SCAN_C:
+      return 'c';
+    default:
+      return 0;
+  }
+}
+
 void term_init(void) {
+  int lookupChannel = romemul_getLookupDataRomDmaChannel();
+  if ((lookupChannel >= 0) && ((uint)lookupChannel < NUM_DMA_CHANNELS)) {
+    lookupDmaChannelCached = (uint8_t)lookupChannel;
+    lookupDmaChannelCachedValid = true;
+  }
+
   // Memory shared address
   memorySharedAddress = (unsigned int)&__rom_in_ram_start__;
   memoryRandomTokenAddress = memorySharedAddress + TERM_RANDOM_TOKEN_OFFSET;
@@ -558,33 +564,6 @@ void term_init(void) {
 
   // Initialize the welcome messages
   term_clearScreen();
-  term_printString("Welcome to the terminal!\n");
-  term_printString("Press ESC to enter the terminal.\n");
-  term_printString("or any SHIFT key to boot the desktop.\n");
-
-  // Example 1: Move the cursor up one line.
-  // VT52 sequence: ESC A (moves cursor up)
-  // The escape sequence "\x1BA" will move the cursor up one line.
-  // term_printString("\x1B" "A");
-  // After moving up, print text that overwrites part of the previous line.
-  // term_printString("Line 2 (modified by ESC A)\n");
-
-  // Example 2: Move the cursor right one character.
-  // VT52 sequence: ESC C (moves cursor right)
-  // term_printString("\x1B" "C");
-  // term_printString(" <-- Moved right with ESC C\n");
-
-  // Example 3: Direct cursor addressing.
-  // VT52 direct addressing uses ESC Y <row> <col>, where:
-  //   row_char = row + 0x20, col_char = col + 0x20.
-  // For instance, to move the cursor to row 0, column 10:
-  //   row: 0 -> 0x20 (' ')
-  //   col: 10 -> 0x20 + 10 = 0x2A ('*')
-  // term_printString("\x1B" "Y" "\x20" "\x2A");
-  // term_printString("Text at row 0, column 10 via ESC Y\n");
-
-  // term_printString("\x1B" "Y" "\x2A" "\x20");
-
   display_refresh();
 }
 
@@ -618,8 +597,7 @@ void __not_in_flash_func(term_loop)() {
         "Command ID: %d. Size: %d. Random token: 0x%08X, Checksum: 0x%04X, "
         "Overwrites: %lu\n",
         protocolSnapshot.command_id, protocolSnapshot.payload_size, randomToken,
-        protocolSnapshot.final_checksum,
-        (unsigned long)overwriteCountSnapshot);
+        protocolSnapshot.final_checksum, (unsigned long)overwriteCountSnapshot);
 
 #if defined(_DEBUG) && (_DEBUG != 0)
     // Jump the random token
@@ -654,14 +632,6 @@ void __not_in_flash_func(term_loop)() {
 
     // Handle the command
     switch (protocolSnapshot.command_id) {
-      case APP_TERMINAL_START: {
-        display_termStart(DISPLAY_TILES_WIDTH, DISPLAY_TILES_HEIGHT);
-        term_clearScreen();
-        term_printString("Type 'help' for available commands.\n");
-        termInputChar('\n');
-        SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_TERM);
-        DPRINTF("Send command to display: DISPLAY_COMMAND_TERM\n");
-      } break;
       case APP_TERMINAL_KEYSTROKE: {
         uint16_t *payload = ((uint16_t *)(protocolSnapshot).payload);
         // Jump the random token
@@ -676,6 +646,7 @@ void __not_in_flash_func(term_loop)() {
         // Get the keyboard scan code from the bits 16 to 23 of the payload
         uint8_t scanCode =
             (payload32 & TERM_KEYBOARD_SCAN_MASK) >> TERM_KEYBOARD_SCAN_SHIFT;
+        char normalizedKeystroke = termNormalizeKeystroke(keystroke, scanCode);
         if (keystroke >= TERM_KEYBOARD_KEY_START &&
             keystroke <= TERM_KEYBOARD_KEY_END) {
           // Print the keystroke and the shift key status
@@ -686,7 +657,9 @@ void __not_in_flash_func(term_loop)() {
           DPRINTF("Keystroke: %d. Shift key: %d, Scan code: %d\n", keystroke,
                   shiftKey, scanCode);
         }
-        termInputChar(keystroke);
+        if (normalizedKeystroke != 0) {
+          termInputChar(normalizedKeystroke);
+        }
         break;
       }
       default:
@@ -706,553 +679,9 @@ void __not_in_flash_func(term_loop)() {
   }
 }
 
-// Command handlers
-void term_printNetworkInfo(void) {
-  char hostName[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char ipAddress[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char gateway[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char dns1[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char dns2[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char netmask[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char ssid[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char bssid[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char authMode[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char signalDb[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char wifiMode[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char wifiLink[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char ipMode[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char wifiMac[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char mcuArch[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char mcuId[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char selectState[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char sdStatus[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char sdSpace[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-
-  term_getConfigValueOrNA(PARAM_HOSTNAME, hostName, sizeof(hostName));
-  term_getConfigValueOrNA(PARAM_WIFI_IP, ipAddress, sizeof(ipAddress));
-  term_getConfigValueOrNA(PARAM_WIFI_GATEWAY, gateway, sizeof(gateway));
-  term_getConfigValueOrNA(PARAM_WIFI_NETMASK, netmask, sizeof(netmask));
-#if defined(CYW43_WL_GPIO_LED_PIN)
-  term_getConfiguredDns(dns1, sizeof(dns1), dns2, sizeof(dns2));
-#else
-  snprintf(dns1, sizeof(dns1), "N/A");
-  snprintf(dns2, sizeof(dns2), "N/A");
-#endif
-  snprintf(ssid, sizeof(ssid), "N/A");
-  snprintf(bssid, sizeof(bssid), "N/A");
-  snprintf(authMode, sizeof(authMode), "N/A");
-  snprintf(signalDb, sizeof(signalDb), "N/A");
-  snprintf(wifiMode, sizeof(wifiMode), "N/A");
-  snprintf(wifiLink, sizeof(wifiLink), "N/A");
-  snprintf(ipMode, sizeof(ipMode), "N/A");
-  snprintf(wifiMac, sizeof(wifiMac), "N/A");
-  snprintf(mcuArch, sizeof(mcuArch), "N/A");
-  snprintf(mcuId, sizeof(mcuId), "N/A");
-  snprintf(selectState, sizeof(selectState), "%s",
-           select_detectPush() ? "Pressed" : "Released");
-  snprintf(sdStatus, sizeof(sdStatus), "Not mounted");
-  snprintf(sdSpace, sizeof(sdSpace), "N/A");
-
-  uint32_t sdTotalMb = 0;
-  uint32_t sdFreeMb = 0;
-  if (sdcard_getMountedInfo(&sdTotalMb, &sdFreeMb)) {
-    snprintf(sdStatus, sizeof(sdStatus), "Mounted");
-    snprintf(sdSpace, sizeof(sdSpace), "%lu/%lu MB free",
-             (unsigned long)sdFreeMb, (unsigned long)sdTotalMb);
-  } else if (sdcard_isMounted()) {
-    snprintf(sdStatus, sizeof(sdStatus), "Error");
-  }
-
-  term_printString("Network status: ");
-
-#if defined(CYW43_WL_GPIO_LED_PIN)
-  const char *wifiModeValue = network_getWifiModeStr();
-  if ((wifiModeValue != NULL) && (wifiModeValue[0] != '\0')) {
-    snprintf(wifiMode, sizeof(wifiMode), "%s", wifiModeValue);
-  }
-  const char *wifiLinkValue = network_wifiConnStatusStr();
-  if ((wifiLinkValue != NULL) && (wifiLinkValue[0] != '\0')) {
-    snprintf(wifiLink, sizeof(wifiLink), "%s", wifiLinkValue);
-  }
-
-  SettingsConfigEntry *dhcpEntry =
-      settings_find_entry(gconfig_getContext(), PARAM_WIFI_DHCP);
-  if ((dhcpEntry != NULL) && (dhcpEntry->value != NULL) &&
-      (dhcpEntry->value[0] != '\0')) {
-    char dhcpChar = dhcpEntry->value[0];
-    bool dhcpEnabled = (dhcpChar == 't') || (dhcpChar == 'T') ||
-                       (dhcpChar == '1') || (dhcpChar == 'y') ||
-                       (dhcpChar == 'Y');
-    snprintf(ipMode, sizeof(ipMode), "%s", dhcpEnabled ? "DHCP" : "Static");
-  }
-
-  const char *wifiMacValue = network_getCyw43MacStr();
-  if ((wifiMacValue != NULL) && (wifiMacValue[0] != '\0')) {
-    snprintf(wifiMac, sizeof(wifiMac), "%s", wifiMacValue);
-  }
-
-  const char *mcuArchValue = network_getMcuArchStr();
-  if ((mcuArchValue != NULL) && (mcuArchValue[0] != '\0')) {
-    snprintf(mcuArch, sizeof(mcuArch), "%s", mcuArchValue);
-  }
-  const char *mcuIdValue = network_getMcuIdStr();
-  if ((mcuIdValue != NULL) && (mcuIdValue[0] != '\0')) {
-    snprintf(mcuId, sizeof(mcuId), "%s", mcuIdValue);
-  }
-
-  ip_addr_t currentIp = network_getCurrentIp();
-  bool hasIp = !ip_addr_isany(&currentIp);
-  term_printString(hasIp ? "Connected\n" : "Not connected\n");
-
-  if (hasIp) {
-    term_getIpStringOrNA(&currentIp, ipAddress, sizeof(ipAddress));
-
-    wifi_network_info_t currentNetwork = network_getCurrentNetworkInfo();
-    if (currentNetwork.ssid[0] != '\0') {
-      snprintf(ssid, sizeof(ssid), "%s", currentNetwork.ssid);
-      snprintf(authMode, sizeof(authMode), "%s",
-               network_getAuthTypeString(currentNetwork.auth_mode));
-    }
-    if (currentNetwork.bssid[0] != '\0') {
-      snprintf(bssid, sizeof(bssid), "%s", currentNetwork.bssid);
-    }
-    if ((currentNetwork.rssi <= 0) && (currentNetwork.rssi >= -120)) {
-      snprintf(signalDb, sizeof(signalDb), "%d dBm", currentNetwork.rssi);
-    }
-  }
-
-  struct netif *netIf = netif_default;
-
-  if (netIf != NULL) {
-    term_getIpStringOrNA(&(netIf->gw), gateway, sizeof(gateway));
-    term_getIpStringOrNA(&(netIf->netmask), netmask, sizeof(netmask));
-
-#if defined(LWIP_NETIF_HOSTNAME) && LWIP_NETIF_HOSTNAME
-    const char *runtimeHostname = netif_get_hostname(netIf);
-    if ((runtimeHostname != NULL) && (runtimeHostname[0] != '\0')) {
-      snprintf(hostName, sizeof(hostName), "%s", runtimeHostname);
-    }
-#endif
-  }
-
-  term_getIpStringOrNA(dns_getserver(0), dns1, sizeof(dns1));
-  term_getIpStringOrNA(dns_getserver(1), dns2, sizeof(dns2));
-#else
-  term_printString("Unavailable\n");
-#endif
-
-  menuRowsValid = false;
-
-  TPRINTF("MCU type  : %s (%s)\n", mcuArch, mcuId);
-  TPRINTF("Host name : %s\n", hostName);
-  TPRINTF("WiFi      : %s (%s)\n", wifiMode, wifiLink);
-  TPRINTF("IP        : %s (%s)\n", ipAddress, ipMode);
-  TPRINTF("Netmask   : %s\n", netmask);
-  TPRINTF("Gateway   : %s\n", gateway);
-  TPRINTF("DNS       : %s, %s\n", dns1, dns2);
-  TPRINTF("WiFi MAC  : %s\n", wifiMac);
-
-  menuRowSsid = cursorY;
-  TPRINTF("SSID      : %s (%s)\n", ssid, signalDb);
-
-  TPRINTF("BSSID     : %s\n", bssid);
-  TPRINTF("Auth mode : %s\n", authMode);
-
-  term_printString("\n");
-  menuRowSelect = cursorY;
-  TPRINTF("SELECT  : %s\n", selectState);
-
-  term_printString("\n");
-  menuRowSd = cursorY;
-  TPRINTF("SD card   : %s (%s)\n", sdStatus, sdSpace);
-
-  menuRowsValid = true;
-}
-
 void term_markMenuPromptCursor(void) {
-  menuPromptRow = cursorY;
-  menuPromptCol = cursorX;
-  menuPromptValid = true;
-}
-
-static void term_appendMoveAndClearLine(char *buffer, size_t bufferSize,
-                                        size_t *offset, uint8_t row) {
-  if ((buffer == NULL) || (offset == NULL) || (*offset >= bufferSize)) {
-    return;
-  }
-
-  size_t remaining = bufferSize - *offset;
-  int written = snprintf(buffer + *offset, remaining, "\x1B"
-                                                      "Y%c%c\x1B"
-                                                      "K",
-                         (char)(TERM_POS_Y + row), (char)(TERM_POS_X));
-  if (written < 0) {
-    return;
-  }
-
-  size_t writeSize = (size_t)written;
-  if (writeSize >= remaining) {
-    *offset = bufferSize - 1;
-    return;
-  }
-
-  *offset += writeSize;
-}
-
-static void term_appendText(char *buffer, size_t bufferSize, size_t *offset,
-                            const char *text) {
-  if ((buffer == NULL) || (offset == NULL) || (text == NULL) ||
-      (*offset >= bufferSize)) {
-    return;
-  }
-
-  size_t remaining = bufferSize - *offset;
-  int written = snprintf(buffer + *offset, remaining, "%s", text);
-  if (written < 0) {
-    return;
-  }
-
-  size_t writeSize = (size_t)written;
-  if (writeSize >= remaining) {
-    *offset = bufferSize - 1;
-    return;
-  }
-
-  *offset += writeSize;
-}
-
-static bool term_buildLiveMenuLines(char *ssidLine, size_t ssidLineSize,
-                                    char *selectLine, size_t selectLineSize,
-                                    char *sdLine, size_t sdLineSize) {
-  if ((ssidLine == NULL) || (selectLine == NULL) || (sdLine == NULL) ||
-      (ssidLineSize == 0) || (selectLineSize == 0) || (sdLineSize == 0)) {
-    return false;
-  }
-
-  char ssid[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char signalDb[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char selectState[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char sdStatus[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-  char sdSpace[TERM_NETWORK_INFO_VALUE_SIZE] = {0};
-
-  snprintf(ssid, sizeof(ssid), "N/A");
-  snprintf(signalDb, sizeof(signalDb), "N/A");
-  snprintf(selectState, sizeof(selectState), "%s",
-           select_detectPush() ? "Pressed" : "Released");
-  snprintf(sdStatus, sizeof(sdStatus), "Not mounted");
-  snprintf(sdSpace, sizeof(sdSpace), "N/A");
-
-  uint32_t sdTotalMb = 0;
-  uint32_t sdFreeMb = 0;
-  if (sdcard_getMountedInfo(&sdTotalMb, &sdFreeMb)) {
-    snprintf(sdStatus, sizeof(sdStatus), "Mounted");
-    snprintf(sdSpace, sizeof(sdSpace), "%lu/%lu MB free", (unsigned long)sdFreeMb,
-             (unsigned long)sdTotalMb);
-  } else if (sdcard_isMounted()) {
-    snprintf(sdStatus, sizeof(sdStatus), "Error");
-  }
-
-#if defined(CYW43_WL_GPIO_LED_PIN)
-  ip_addr_t currentIp = network_getCurrentIp();
-  bool hasIp = !ip_addr_isany(&currentIp);
-  if (hasIp) {
-    wifi_network_info_t currentNetwork = network_getCurrentNetworkInfo();
-    if (currentNetwork.ssid[0] != '\0') {
-      snprintf(ssid, sizeof(ssid), "%s", currentNetwork.ssid);
-    }
-    if ((currentNetwork.rssi <= 0) && (currentNetwork.rssi >= -120)) {
-      snprintf(signalDb, sizeof(signalDb), "%d dBm", currentNetwork.rssi);
-    }
-  }
-#endif
-
-  snprintf(ssidLine, ssidLineSize, "SSID      : %s (%s)", ssid, signalDb);
-  snprintf(selectLine, selectLineSize, "SELECT  : %s", selectState);
-  snprintf(sdLine, sdLineSize, "SD card   : %s (%s)", sdStatus, sdSpace);
-
-  return true;
-}
-
-void term_refreshMenuLiveInfo(void) {
-  static char prevSsidLine[TERM_MENU_LIVE_LINE_MAX] = {0};
-  static char prevSelectLine[TERM_MENU_LIVE_LINE_MAX] = {0};
-  static char prevSdLine[TERM_MENU_LIVE_LINE_MAX] = {0};
-
-  char ssidLine[TERM_MENU_LIVE_LINE_MAX] = {0};
-  char selectLine[TERM_MENU_LIVE_LINE_MAX] = {0};
-  char sdLine[TERM_MENU_LIVE_LINE_MAX] = {0};
-
-  if (!menuRowsValid ||
-      !term_buildLiveMenuLines(ssidLine, sizeof(ssidLine), selectLine,
-                               sizeof(selectLine), sdLine, sizeof(sdLine))) {
-    return;
-  }
-
-  bool updateSsid = (strcmp(ssidLine, prevSsidLine) != 0);
-  bool updateSelect = (strcmp(selectLine, prevSelectLine) != 0);
-  bool updateSd = (strcmp(sdLine, prevSdLine) != 0);
-
-  if (!updateSsid && !updateSelect && !updateSd) {
-    return;
-  }
-
-  char updateBuffer[512] = {0};
-  size_t offset = 0;
-
-  if (updateSsid) {
-    term_appendMoveAndClearLine(updateBuffer, sizeof(updateBuffer), &offset,
-                                menuRowSsid);
-    term_appendText(updateBuffer, sizeof(updateBuffer), &offset, ssidLine);
-  }
-
-  if (updateSelect) {
-    term_appendMoveAndClearLine(updateBuffer, sizeof(updateBuffer), &offset,
-                                menuRowSelect);
-    term_appendText(updateBuffer, sizeof(updateBuffer), &offset, selectLine);
-  }
-
-  if (updateSd) {
-    term_appendMoveAndClearLine(updateBuffer, sizeof(updateBuffer), &offset,
-                                menuRowSd);
-    term_appendText(updateBuffer, sizeof(updateBuffer), &offset, sdLine);
-  }
-
-  // Restore the cursor to the menu prompt input position.
-  if (menuPromptValid && (offset < sizeof(updateBuffer))) {
-    size_t remaining = sizeof(updateBuffer) - offset;
-    int written = snprintf(updateBuffer + offset, remaining, "\x1B"
-                                                            "Y%c%c",
-                           (char)(TERM_POS_Y + menuPromptRow),
-                           (char)(TERM_POS_X + menuPromptCol));
-    if (written > 0) {
-      size_t writeSize = (size_t)written;
-      if (writeSize >= remaining) {
-        offset = sizeof(updateBuffer) - 1;
-      } else {
-        offset += writeSize;
-      }
-    }
-  }
-
-  snprintf(prevSsidLine, sizeof(prevSsidLine), "%s", ssidLine);
-  snprintf(prevSelectLine, sizeof(prevSelectLine), "%s", selectLine);
-  snprintf(prevSdLine, sizeof(prevSdLine), "%s", sdLine);
-
-  term_printString(updateBuffer);
-}
-
-static bool term_parseKeyAndTail(const char *arg, char *key, size_t keySize,
-                                 const char **tail) {
-  if ((arg == NULL) || (key == NULL) || (keySize == 0)) {
-    return false;
-  }
-
-  while (isspace((unsigned char)*arg)) {
-    arg++;
-  }
-  if (*arg == '\0') {
-    return false;
-  }
-
-  const char *end = arg;
-  while ((*end != '\0') && !isspace((unsigned char)*end)) {
-    end++;
-  }
-
-  size_t keyLen = (size_t)(end - arg);
-  if ((keyLen == 0) || (keyLen >= keySize)) {
-    return false;
-  }
-
-  memcpy(key, arg, keyLen);
-  key[keyLen] = '\0';
-
-  while (isspace((unsigned char)*end)) {
-    end++;
-  }
-
-  if (tail != NULL) {
-    *tail = end;
-  }
-  return true;
-}
-
-static bool term_parseBoolToken(const char *valueToken, bool *value) {
-  if ((valueToken == NULL) || (value == NULL)) {
-    return false;
-  }
-
-  char valueStr[TERM_BOOL_INPUT_BUFF] = {0};
-  size_t valueLen = strcspn(valueToken, " \t\r\n");
-  if ((valueLen == 0) || (valueLen >= sizeof(valueStr))) {
-    return false;
-  }
-  memcpy(valueStr, valueToken, valueLen);
-  valueStr[valueLen] = '\0';
-
-  for (size_t i = 0; valueStr[i] != '\0'; i++) {
-    valueStr[i] = (char)tolower((unsigned char)valueStr[i]);
-  }
-
-  if ((strcmp(valueStr, "true") == 0) || (strcmp(valueStr, "t") == 0) ||
-      (strcmp(valueStr, "1") == 0)) {
-    *value = true;
-    return true;
-  }
-  if ((strcmp(valueStr, "false") == 0) || (strcmp(valueStr, "f") == 0) ||
-      (strcmp(valueStr, "0") == 0)) {
-    *value = false;
-    return true;
-  }
-
-  return false;
-}
-
-// Command handlers
-void term_cmdSettings(const char *arg) {
-  term_printString(
-      "\x1B"
-      "E"
-      "Available settings commands:\n");
-  term_printString("  print   - Show settings\n");
-  term_printString("  save    - Save settings\n");
-  term_printString("  erase   - Erase settings\n");
-  term_printString("  get     - Get setting (requires key)\n");
-  term_printString("  put_int - Set integer (key and value)\n");
-  term_printString("  put_bool- Set boolean (key and value)\n");
-  term_printString("  put_str - Set string (key and value)\n");
-  term_printString("\n");
-}
-
-void term_cmdPrint(const char *arg) {
-  char *buffer = (char *)malloc(TERM_PRINT_SETTINGS_BUFFER_SIZE);
-  if (buffer == NULL) {
-    term_printString("Error: Out of memory.\n");
-    return;
-  }
-  settings_print(aconfig_getContext(), buffer);
-  term_printString(buffer);
-  free(buffer);
-}
-
-void term_cmdClear(const char *arg) { term_clearScreen(); }
-
-void term_cmdExit(const char *arg) {
-  term_printString("Exiting terminal...\n");
-  // Send continue to desktop command
-  SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_CONTINUE);
-}
-
-void term_cmdUnknown(const char *arg) {
-  TPRINTF("Unknown command. Type 'help' for a list of commands.\n");
-}
-
-void term_cmdSave(const char *arg) {
-  settings_save(aconfig_getContext(), true);
-  term_printString("Settings saved.\n");
-}
-
-void term_cmdErase(const char *arg) {
-  settings_erase(aconfig_getContext());
-  term_printString("Settings erased.\n");
-}
-
-void term_cmdGet(const char *arg) {
-  if (arg && strlen(arg) > 0) {
-    SettingsConfigEntry *entry =
-        settings_find_entry(aconfig_getContext(), &arg[0]);
-    if (entry != NULL) {
-      TPRINTF("Key: %s\n", entry->key);
-      TPRINTF("Type: ");
-      switch (entry->dataType) {
-        case SETTINGS_TYPE_INT:
-          TPRINTF("INT");
-          break;
-        case SETTINGS_TYPE_STRING:
-          TPRINTF("STRING");
-          break;
-        case SETTINGS_TYPE_BOOL:
-          TPRINTF("BOOL");
-          break;
-        default:
-          TPRINTF("UNKNOWN");
-          break;
-      }
-      TPRINTF("\n");
-      TPRINTF("Value: %s\n", entry->value);
-    } else {
-      TPRINTF("Key not found.\n");
-    }
-  } else {
-    TPRINTF("No key provided for 'get' command.\n");
-  }
-}
-
-void term_cmdPutInt(const char *arg) {
-  char key[SETTINGS_MAX_KEY_LENGTH] = {0};
-  const char *valueStr = NULL;
-  if (term_parseKeyAndTail(arg, key, sizeof(key), &valueStr) &&
-      (valueStr != NULL) && (valueStr[0] != '\0')) {
-    char *endPtr = NULL;
-    long parsedValue = strtol(valueStr, &endPtr, DEC_BASE);
-    while ((endPtr != NULL) && isspace((unsigned char)*endPtr)) {
-      endPtr++;
-    }
-    if ((endPtr == valueStr) || ((endPtr != NULL) && (*endPtr != '\0')) ||
-        (parsedValue < INT_MIN) || (parsedValue > INT_MAX)) {
-      TPRINTF("Invalid arguments for 'put_int' command.\n");
-      return;
-    }
-
-    int value = (int)parsedValue;
-    int err = settings_put_integer(aconfig_getContext(), key, value);
-    if (err == 0) {
-      TPRINTF("Key: %s\n", key);
-      TPRINTF("Value: %d\n", value);
-    } else {
-      TPRINTF("Error setting integer value for key: %s\n", key);
-    }
-  } else {
-    TPRINTF("Invalid arguments for 'put_int' command.\n");
-  }
-}
-
-void term_cmdPutBool(const char *arg) {
-  char key[SETTINGS_MAX_KEY_LENGTH] = {0};
-  const char *valueToken = NULL;
-  bool value = false;
-
-  if (term_parseKeyAndTail(arg, key, sizeof(key), &valueToken) &&
-      (valueToken != NULL) && term_parseBoolToken(valueToken, &value)) {
-    // Store the boolean value
-    int err = settings_put_bool(aconfig_getContext(), key, value);
-    if (err == 0) {
-      TPRINTF("Key: %s\n", key);
-      TPRINTF("Value: %s\n", value ? "true" : "false");
-    } else {
-      TPRINTF("Error setting boolean value for key: %s\n", key);
-    }
-  } else {
-    TPRINTF(
-        "Invalid arguments for 'put_bool' command. Usage: put_bool <key> "
-        "<true/false>\n");
-  }
-}
-
-void term_cmdPutString(const char *arg) {
-  char key[SETTINGS_MAX_KEY_LENGTH] = {0};
-  const char *value = NULL;
-
-  if (term_parseKeyAndTail(arg, key, sizeof(key), &value)) {
-    const char *safeValue = (value != NULL) ? value : "";
-    int err = settings_put_string(aconfig_getContext(), key, safeValue);
-    if (err == 0) {
-      TPRINTF("Key: %s\n", key);
-      TPRINTF("Value: %s\n", (safeValue[0] != '\0') ? safeValue : "<EMPTY>");
-    } else {
-      TPRINTF("Error setting string value for key: %s\n", key);
-    }
-  } else {
-    TPRINTF("Invalid arguments for 'put_string' command.\n");
-  }
+  // Kept for API compatibility with callers that mark the prompt position.
+  // Live row refresh is not used in the current build.
+  (void)cursorX;
+  (void)cursorY;
 }

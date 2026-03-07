@@ -29,7 +29,7 @@ filename="./dist/FIRMWARE.IMG"
 ST_WORKING_FOLDER=$working_folder stcmd cp ./dist/BOOT.BIN $filename
 
 # Determine the file size accordingly
-filesize=$(ST_WORKING_FOLDER=$working_folder stcmd stat -c %s "$filename")
+filesize=$(ST_WORKING_FOLDER=$working_folder stcmd stat -c %s "$filename" | tr -d '\r\n')
 
 # Size for 64Kbytes in bytes
 targetsize=$((64 * 1024))

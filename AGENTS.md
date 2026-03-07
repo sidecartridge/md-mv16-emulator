@@ -12,7 +12,6 @@ Welcome to the md-microfirmware-template workspace. This is the quick primer so 
   ```bash
   export PICO_SDK_PATH=$REPO_ROOT/pico-sdk
   export PICO_EXTRAS_PATH=$REPO_ROOT/pico-extras
-  export FATFS_SDK_PATH=$REPO_ROOT/fatfs-sdk
   ```
 - **Optional debugger helpers**
   ```bash
@@ -26,11 +25,13 @@ Welcome to the md-microfirmware-template workspace. This is the quick primer so 
 # List workspace via stcmd (requires PTY)
 stcmd ls
 
-# Build firmware (example board + UUID)
+# Build firmware (validation command)
 cd md-microfirmware-template
 PICO_TOOLCHAIN_PATH=/Applications/ArmGNUToolchain/14.2.rel1/arm-none-eabi/bin \
-  ./build.sh pico_w release 123e4567-e89b-12d3-a456-426614174000
+  ./build.sh pico_w debug 44444444-4444-4444-8444-444444444444
 ```
+
+- Validation UUID policy: use `44444444-4444-4444-8444-444444444444` for local build validation.
 
 ## 3. Build Notes & Gotchas
 - `CHARACTER_GAP_MS` constant lives in `rp/src/include/blink.h`. Keep it defined (700 ms) or the RP build fails.
@@ -48,7 +49,6 @@ PICO_TOOLCHAIN_PATH=/Applications/ArmGNUToolchain/14.2.rel1/arm-none-eabi/bin \
 
 ## 5. Editing Guardrails
 - Agents are **not allowed** to modify code inside these directories under any circumstances:
-  - `/fatfs-sdk`
   - `/pico-sdk`
   - `/pico-extras`
 

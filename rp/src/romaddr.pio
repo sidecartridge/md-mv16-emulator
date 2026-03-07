@@ -1,0 +1,62 @@
+; RP2040 PIO program to capture ROM3 bus words into RX FIFO
+; Author: Diego Parrilla Santamaria
+; Date: March 2026
+
+.define public ROMADDR_ROM3_GPIO 26
+.define public ROMADDR_ROM4_GPIO 22
+.define public ROMADDR_ACTIVE 0
+.define public ROMADDR_INACTIVE 1
+.define public ROMADDR_BUS_PINS 16
+.define public ROMADDR_READ_ADDRESS_SAFE_WAIT_CYCLES 3
+
+; Inverted READ/WRITE signals (same model as romemul.pio)
+; READ is LSB side-set bit, WRITE is MSB side-set bit
+.define public ROMADDR_READ_WRITE 0b00
+.define public ROMADDR_NOT_READ_WRITE 0b01
+.define public ROMADDR_READ_NOT_WRITE 0b10
+.define public ROMADDR_NOT_READ_NOT_WRITE 0b11
+
+.program romaddr_capture
+    .side_set 2 opt
+
+.wrap_target
+    wait ROMADDR_INACTIVE gpio ROMADDR_ROM4_GPIO side ROMADDR_NOT_READ_NOT_WRITE
+    wait ROMADDR_ACTIVE gpio ROMADDR_ROM4_GPIO   side ROMADDR_NOT_READ_NOT_WRITE
+
+    ; Drive bus pins as input while we sample address/data lines.
+    mov osr, null                    side ROMADDR_NOT_READ_NOT_WRITE
+    out pindirs, ROMADDR_BUS_PINS    side ROMADDR_NOT_READ_NOT_WRITE
+
+    ; Assert READ (inverted), keep WRITE inactive and wait for bus settle.
+    nop side ROMADDR_READ_NOT_WRITE [ROMADDR_READ_ADDRESS_SAFE_WAIT_CYCLES]
+    nop side ROMADDR_READ_NOT_WRITE [ROMADDR_READ_ADDRESS_SAFE_WAIT_CYCLES]
+    nop side ROMADDR_READ_NOT_WRITE [ROMADDR_READ_ADDRESS_SAFE_WAIT_CYCLES]
+
+    ; Push 16 bus pins to RX FIFO.
+    in pins ROMADDR_BUS_PINS         side ROMADDR_READ_NOT_WRITE
+
+    ; Release READ/WRITE back to inactive.
+    nop                              side ROMADDR_NOT_READ_NOT_WRITE
+.wrap
+
+% c-sdk {
+
+static inline void romaddr_capture_program_init(PIO pio, uint sm, uint offset,
+                                                uint bus_pin_base,
+                                                uint bus_pin_count,
+                                                uint rw_pin_base, float div) {
+    pio_sm_config c = romaddr_capture_program_get_default_config(offset);
+
+    sm_config_set_in_pins(&c, bus_pin_base);
+    sm_config_set_in_shift(&c, false, true, bus_pin_count);
+    sm_config_set_out_pins(&c, bus_pin_base, bus_pin_count);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    sm_config_set_sideset_pins(&c, rw_pin_base);
+    sm_config_set_clkdiv(&c, div);
+
+    pio_sm_set_consecutive_pindirs(pio, sm, bus_pin_base, bus_pin_count, false);
+    pio_sm_set_consecutive_pindirs(pio, sm, rw_pin_base, 2, true);
+    pio_sm_init(pio, sm, offset, &c);
+}
+
+%}

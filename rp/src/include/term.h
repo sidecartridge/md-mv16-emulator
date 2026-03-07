@@ -9,6 +9,7 @@
 #ifndef TERM_H
 #define TERM_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include "pico.h"
@@ -48,7 +49,6 @@
 #define APP_TERMINAL 0x00  // The terminal app
 
 // App terminal commands
-#define APP_TERMINAL_START 0x00      // Enter terminal command
 #define APP_TERMINAL_KEYSTROKE 0x01  // Keystroke command
 
 #ifdef DISPLAY_ATARIST
@@ -98,7 +98,10 @@ typedef struct {
   void (*handler)(const char *arg);
 } Command;
 
+typedef bool (*term_raw_key_handler_t)(char chr);
+
 void __not_in_flash_func(term_dma_irq_handler_lookup)(void);
+void __not_in_flash_func(stream_dma_irq_handler_lookup)(void);
 
 void term_init(void);
 
@@ -140,28 +143,16 @@ void term_setCommands(const Command *cmds, size_t count);
 void term_clearInputBuffer(void);
 
 /**
- * @brief Retrieve the current terminal input buffer.
+ * @brief Registers a raw key handler that can consume terminal keystrokes.
  *
- * This function returns a pointer to the buffer holding the input from the
- * terminal. The buffer is used for processing terminal input.
+ * If the handler returns true for a key, normal terminal line editing and
+ * command parsing are skipped for that key.
  *
- * @return char* A pointer to the terminal's input buffer.
+ * @param handler Callback to receive each key press. Pass NULL to disable.
  */
-char *term_getInputBuffer(void);
+void term_setRawKeyHandler(term_raw_key_handler_t handler);
 
-// Generic commands to be used in the terminal
-// Manage application setttings
-void term_cmdSettings(const char *arg);
-void term_cmdPrint(const char *arg);
-void term_cmdSave(const char *arg);
-void term_cmdErase(const char *arg);
-void term_cmdGet(const char *arg);
-void term_cmdPutInt(const char *arg);
-void term_cmdPutBool(const char *arg);
-void term_cmdPutString(const char *arg);
-void term_printNetworkInfo(void);
 void term_markMenuPromptCursor(void);
-void term_refreshMenuLiveInfo(void);
 
 void __not_in_flash_func(term_loop)();
 

@@ -11,60 +11,30 @@
 #include <stdint.h>
 
 // inclusw in the C file to avoid multiple definitions
-#include "target_firmware.h"  // Include the target firmware binary
-
+#include "a2dp.h"
 #include "aconfig.h"
 #include "constants.h"
 #include "debug.h"
 #include "display.h"
-#include "ff.h"
-#include "gconfig.h"
 #include "memfunc.h"
-#include "network.h"
 #include "pico/stdlib.h"
 #include "reset.h"
 #include "romemul.h"
-#include "sdcard.h"
 #include "select.h"
+#include "target_firmware.h"  // Include the target firmware binary
 #include "term.h"
 
 #define SLEEP_LOOP_MS 100
 
-enum {
-  APP_MODE_SETUP = 255  // Setup
-};
-
 // Command handlers
-static void cmdMenu(const char *arg);
-static void cmdClear(const char *arg);
 static void cmdExit(const char *arg);
-static void cmdHelp(const char *arg);
 static void cmdBooster(const char *arg);
-static void cmdSettings(const char *arg);
-static void cmdPrint(const char *arg);
-static void cmdSave(const char *arg);
-static void cmdErase(const char *arg);
-static void cmdGet(const char *arg);
-static void cmdPutInt(const char *arg);
-static void cmdPutBool(const char *arg);
-static void cmdPutString(const char *arg);
+static void cmdA2dp(const char *arg);
 
 // Command table
 static const Command commands[] = {
-    {"m", cmdMenu},
-    {"h", cmdHelp},
-    {"e", cmdExit},
-    {"x", cmdBooster},
-    {"?", cmdHelp},
-    {"s", cmdSettings},
-    {"settings", cmdSettings},
-    {"print", cmdPrint},
-    {"save", cmdSave},
-    {"erase", cmdErase},
-    {"get", cmdGet},
-    {"put_int", cmdPutInt},
-    {"put_bool", cmdPutBool},
-    {"put_str", cmdPutString},
+    {"s", cmdA2dp},    {"S", cmdA2dp}, {"x", cmdBooster},
+    {"X", cmdBooster}, {"e", cmdExit}, {"E", cmdExit},
 };
 
 // Number of commands in the table
@@ -85,51 +55,33 @@ static void showTitle() {
   term_printString(
       "\x1B"
       "E"
-      "Microfirmware test app - " RELEASE_VERSION "\n");
+      "MV16 Emulator - " RELEASE_VERSION "\n");
 }
 
 static void menu(void) {
   menuScreenActive = true;
   showTitle();
   term_printString("\n\n");
-  term_printString("[S]ettings     | Back to this [M]enu\n");
-  term_printString("[E]xit desktop | [X] Back to Booster\n\n");
-
-  // Display network information
-  term_printNetworkInfo();
-
-  term_printString("\n");
-  term_printString("Select an option: ");
+  term_printString("Starting scan by default...\n");
+  term_printString("[S] Start scan\n");
+  term_printString("[X] Launch booster\n");
+  term_printString("[E] Exit to desktop\n");
+  term_printString("\nSelect an option: ");
   term_markMenuPromptCursor();
   menuRefreshTime = make_timeout_time_ms(MENU_REFRESH_TIME_MS);
 }
 
-// Command handlers
-void cmdMenu(const char *arg) { menu(); }
-
-void cmdHelp(const char *arg) {
-  menuScreenActive = false;
-  // term_printString("\x1B" "E" "Available commands:\n");
-  term_printString("Available commands:\n");
-  term_printString(" General:\n");
-  term_printString("  clear   - Clear the terminal screen\n");
-  term_printString("  exit    - Exit the terminal\n");
-  term_printString("  help    - Show available commands\n");
-}
-
-void cmdClear(const char *arg) {
-  menuScreenActive = false;
-  term_clearScreen();
-}
-
 void cmdExit(const char *arg) {
+  (void)arg;
   menuScreenActive = false;
+  keepActive = false;
   term_printString("Exiting terminal...\n");
   // Send continue to desktop command
   SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_CONTINUE);
 }
 
 void cmdBooster(const char *arg) {
+  (void)arg;
   menuScreenActive = false;
   term_printString("Launching Booster app...\n");
   term_printString("The computer will boot shortly...\n\n");
@@ -138,44 +90,26 @@ void cmdBooster(const char *arg) {
   keepActive = false;         // Exit the active loop
 }
 
-void cmdSettings(const char *arg) {
+void cmdA2dp(const char *arg) {
+  (void)arg;
   menuScreenActive = false;
-  term_cmdSettings(arg);
-}
 
-void cmdPrint(const char *arg) {
-  menuScreenActive = false;
-  term_cmdPrint(arg);
-}
+  term_printString("Launching scan mode...\n");
+  term_printString("Press X to launch booster or E to exit desktop.\n");
 
-void cmdSave(const char *arg) {
-  menuScreenActive = false;
-  term_cmdSave(arg);
-}
-
-void cmdErase(const char *arg) {
-  menuScreenActive = false;
-  term_cmdErase(arg);
-}
-
-void cmdGet(const char *arg) {
-  menuScreenActive = false;
-  term_cmdGet(arg);
-}
-
-void cmdPutInt(const char *arg) {
-  menuScreenActive = false;
-  term_cmdPutInt(arg);
-}
-
-void cmdPutBool(const char *arg) {
-  menuScreenActive = false;
-  term_cmdPutBool(arg);
-}
-
-void cmdPutString(const char *arg) {
-  menuScreenActive = false;
-  term_cmdPutString(arg);
+  a2dp_source_demo_exit_action_t action = a2dp_source_demo_launch();
+  switch (action) {
+    case A2DP_SOURCE_DEMO_EXIT_BOOSTER:
+      cmdBooster(NULL);
+      break;
+    case A2DP_SOURCE_DEMO_EXIT_DESKTOP:
+      cmdExit(NULL);
+      break;
+    case A2DP_SOURCE_DEMO_EXIT_NONE:
+    default:
+      menu();
+      break;
+  }
 }
 
 // This section contains the functions that are called from the main loop
@@ -194,7 +128,6 @@ static void preinit() {
   // Show the title
   showTitle();
   term_printString("\n\n");
-  term_printString("Configuring network... please wait...\n");
 
   display_refresh();
 }
@@ -223,6 +156,7 @@ static void init(void) {
 
   // Display the menu
   menu();
+  cmdA2dp(NULL);
 
   // Example 1: Move the cursor up one line.
   // VT52 sequence: ESC A (moves cursor up)
@@ -273,30 +207,6 @@ void emul_start() {
   // between the two devices in the tprotocol.h file.
   //
 
-  // 1. Check if the host device must be initialized to perform the emulation
-  //    of the device, or start in setup/configuration mode
-  SettingsConfigEntry *appMode =
-      settings_find_entry(aconfig_getContext(), ACONFIG_PARAM_MODE);
-  int appModeValue = APP_MODE_SETUP;  // Setup menu
-  if (appMode == NULL) {
-    DPRINTF(
-        "APP_MODE_SETUP not found in the configuration. Using default value\n");
-  } else {
-    appModeValue = atoi(appMode->value);
-    DPRINTF("Start emulation in mode: %i\n", appModeValue);
-  }
-
-  // 2. Initialiaze the normal operation of the app, unless the configuration
-  // option says to start the config app Or a SELECT button is (or was) pressed
-  // to start the configuration section of the app
-
-  // In this example, the flow will always start the configuration app first
-  // The ROM Emulator app for example will check here if the start directly
-  // in emulation mode is needed or not
-
-  // 3. If we are here, it means the app is not in emulation mode, but in
-  // setup/configuration mode
-
   // As a rule of thumb, the remote device (the computer) driver code must
   // be copied to the RAM of the host device where the emulation will take
   // place.
@@ -327,153 +237,19 @@ void emul_start() {
   // Initialize the display
   display_setupU8g2();
 
-  // 5. Init the sd card
-  // Most of the apps or microfirmwares will need to read and write files
-  // to the SD card. The SD card is used to store the ROM, floppies, even
-  // full hard disk files, configuration files, and other data.
-  // The SD card is initialized here. If the SD card is not present, the
-  // app continues and reports SD status in the terminal menu.
-  // Each app or microfirmware must have a folder in the SD card where the
-  // files are stored. The folder name is defined in the configuration.
-  // If there is no folder in the micro SD card, the app will create it.
-
-  FATFS fsys;
-  SettingsConfigEntry *folder =
-      settings_find_entry(aconfig_getContext(), ACONFIG_PARAM_FOLDER);
-  char *folderName = "/test";  // MODIFY THIS TO YOUR FOLDER NAME
-  if (folder == NULL) {
-    DPRINTF("FOLDER not found in the configuration. Using default value\n");
-  } else {
-    DPRINTF("FOLDER: %s\n", folder->value);
-    folderName = folder->value;
-  }
-  int sdcardErr = sdcard_initFilesystem(&fsys, folderName);
-  if (sdcardErr != SDCARD_INIT_OK) {
-    DPRINTF("SD card unavailable (error %i). Continuing without SD.\n", sdcardErr);
-  } else {
-    DPRINTF("SD card found & initialized\n");
-  }
-
-  // Initialize the display again (in case the terminal emulator changed it)
-  display_setupU8g2();
-
-  // Pre-init the stuff
-  // In this example it only prints the please wait message, but can be used as
-  // a place to put other code that needs to be run before the network is
-  // initialized
+  // Show startup menu and wait for user action.
   preinit();
-
-  // 6. Init the network, if needed
-  // It's always a good idea to wait for the network to be ready
-  // Get the WiFi mode from the settings
-  // If you are developing code that does not use the network, you can
-  // comment this section
-  // It's important to note that the network parameters are taken from the
-  // global configuration of the Booster app. The network parameters are
-  // ready only for the microfirmware apps.
-  SettingsConfigEntry *wifiMode =
-      settings_find_entry(gconfig_getContext(), PARAM_WIFI_MODE);
-  wifi_mode_t wifiModeValue = WIFI_MODE_STA;
-  if (wifiMode == NULL) {
-    DPRINTF("No WiFi mode found in the settings. No initializing.\n");
-  } else {
-    wifiModeValue = (wifi_mode_t)atoi(wifiMode->value);
-    if (wifiModeValue != WIFI_MODE_AP) {
-      DPRINTF("WiFi mode is STA\n");
-      wifiModeValue = WIFI_MODE_STA;
-      int err = network_wifiInit(wifiModeValue);
-      if (err != 0) {
-        DPRINTF("Error initializing the network: %i. No initializing.\n", err);
-      } else {
-        // Set the term_loop as a callback during the polling period
-        network_setPollingCallback(term_loop);
-        // Connect to the WiFi network
-        int maxAttempts = 3;  // or any other number defined elsewhere
-        int attempt = 0;
-        err = NETWORK_WIFI_STA_CONN_ERR_TIMEOUT;
-
-        while ((attempt < maxAttempts) &&
-               (err == NETWORK_WIFI_STA_CONN_ERR_TIMEOUT)) {
-          err = network_wifiStaConnect();
-          attempt++;
-
-          if ((err > 0) && (err < NETWORK_WIFI_STA_CONN_ERR_TIMEOUT)) {
-            DPRINTF("Error connecting to the WiFi network: %i\n", err);
-          }
-        }
-
-        if (err == NETWORK_WIFI_STA_CONN_ERR_TIMEOUT) {
-          DPRINTF("Timeout connecting to the WiFi network after %d attempts\n",
-                  maxAttempts);
-          // Optionally, return an error code here.
-        }
-        network_setPollingCallback(NULL);
-      }
-    } else {
-      DPRINTF("WiFi mode is AP. No initializing.\n");
-    }
-  }
-
-  // 7. Configure the SELECT button so menu status can show it immediately.
-  select_configure();
-
-  // 8. Now complete the terminal emulator initialization
-  // The terminal emulator is used to interact with the user to configure the
-  // device.
   init();
 
-  // Blink on
-#ifdef BLINK_H
-  blink_on();
-#endif
-
-  // 9. Start the main loop
-  // The main loop is the core of the app. It is responsible for running the
-  // app, handling the user input, and performing the tasks of the app.
-  // The main loop runs until the user decides to exit.
-  // For testing purposes, this app only shows commands to manage the settings
-  DPRINTF("Start the app loop here\n");
   while (getKeepActive()) {
-#if PICO_CYW43_ARCH_POLL
-    network_safePoll();
-    cyw43_arch_wait_for_work_until(make_timeout_time_ms(SLEEP_LOOP_MS));
-#else
     sleep_ms(SLEEP_LOOP_MS);
-#endif
-    // Check remote commands
+    select_checkPushReset();
     term_loop();
-
-    if (menuScreenActive) {
-      char *input = term_getInputBuffer();
-      bool hasPendingInput = (input != NULL) && (input[0] != '\0');
-      if (!hasPendingInput &&
-          (absolute_time_diff_us(get_absolute_time(), menuRefreshTime) <= 0)) {
-        term_refreshMenuLiveInfo();
-        menuRefreshTime = make_timeout_time_ms(MENU_REFRESH_TIME_MS);
-      }
-    }
   }
 
-  // 10. Send RESET computer command
-  // Ok, so we are done with the setup but we want to reset the computer to
-  // reboot in the same microfirmware app or start the booster app
-
-  sleep_ms(SLEEP_LOOP_MS);
-  // We must reset the computer
-  SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
-  sleep_ms(SLEEP_LOOP_MS);
-  if (getResetDevice()) {
-    // Reset the device
-    reset_device();
-  } else {
-    // Before jumping to the booster app, let's clean the settings
-    // Set emulation mode to 255 (setup menu)
-    settings_put_integer(aconfig_getContext(), ACONFIG_PARAM_MODE,
-                         APP_MODE_SETUP);
-    settings_save(aconfig_getContext(), true);
-
-    // Jump to the booster app
-    DPRINTF("Jumping to the booster app...\n");
+  if (!getResetDevice()) {
     reset_jump_to_booster();
   }
+
+  return;
 }

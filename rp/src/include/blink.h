@@ -15,7 +15,6 @@
 #include "pico/stdlib.h"
 
 #ifdef CYW43_WL_GPIO_LED_PIN
-#include "network.h"
 #include "pico/cyw43_arch.h"
 #endif
 

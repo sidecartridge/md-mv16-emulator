@@ -247,9 +247,17 @@ void emul_start() {
     term_loop();
   }
 
-  if (!getResetDevice()) {
+  sleep_ms(SLEEP_LOOP_MS);
+  // We must reset the computer
+  SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
+  sleep_ms(SLEEP_LOOP_MS);
+  if (getResetDevice()) {
+    // Reset the device
+    reset_device();
+  } else {
+    // Jump to the booster app
+    DPRINTF("Jumping to the booster app...\n");
     reset_jump_to_booster();
   }
-
   return;
 }

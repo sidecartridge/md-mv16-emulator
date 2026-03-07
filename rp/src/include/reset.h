@@ -14,6 +14,7 @@
 #include "gconfig.h"
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
+#include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "settings.h"
 
@@ -29,7 +30,25 @@
  * @note This function should not return. If it does, an error message is
  * printed.
  */
-void __attribute__((noreturn)) reset_jump_to_booster(void);
+static inline void reset_jump_to_booster(void) {
+  // This code jumps to the Booster application at the top of the flash memory.
+  // The reason to perform this jump is for performance reasons.
+  // It should be placed at the beginning of main() if the SELECT signal or
+  // BOOSTER app is selected. Set VTOR register, set stack pointer, and jump to
+  // reset.
+  __asm__ __volatile__(
+      "mov r0, %[start]\n"
+      "ldr r1, =%[vtable]\n"
+      "str r0, [r1]\n"
+      "ldmia r0, {r0, r1}\n"
+      "msr msp, r0\n"
+      "bx r1\n"
+      :
+      : [start] "r"((unsigned int)&_booster_app_flash_start + 256),
+        [vtable] "X"(PPB_BASE + M0PLUS_VTOR_OFFSET)
+      :);
+  DPRINTF("You should never reach this point\n");
+}
 
 /**
  * @brief Reset the app and reentry in the main device app in flash

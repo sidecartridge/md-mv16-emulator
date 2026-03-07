@@ -235,10 +235,7 @@ add_definitions(-D_DEBUG=${_DEBUG})
 # Device/Computer type
 add_definitions(-DDISPLAY_ATARIST)
 
-# Core 1 is not used for flash operations in this app.
-# Mark core 1 as safe so flash-safe execution on core 0 won't require
-# multicore lockout initialization on the other core.
-add_definitions(-DPICO_FLASH_ASSUME_CORE1_SAFE=1)
+add_definitions(-DPICO_FLASH_ASSUME_CORE1_SAFE=0)
 
 # Select HTTPS or HTTP downloads of the firmware
 add_definitions(-DAPP_DOWNLOAD_HTTPS=0)

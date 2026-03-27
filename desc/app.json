@@ -10,8 +10,8 @@
   "devices": [
     "ST",
     "STE",
-    "Mega ST",
-    "Mega STE",
+    "MegaST",
+    "MegaSTE",
     "TT",
     "Falcon"
   ],

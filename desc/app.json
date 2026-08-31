@@ -2,7 +2,7 @@
   "uuid": "<APP_UUID>",
   "name": "MV16 Emulator",
   "description": "Emulates the MV16 audio device for Atari ST computers and outputs audio through Bluetooth audio streams. <a target='_blank' href='https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/mv16-emulator/'>Learn more</a>",
-  "image": "https://placehold.co/256x256/png",
+  "image": "https://raw.githubusercontent.com/sidecartridge/md-mv16-emulator/main/icon.png",
   "tags": [
     "Emulation",
     "Audio"

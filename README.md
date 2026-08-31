@@ -1,6 +1,18 @@
-# SidecarTridge MV16 Emulator
+<div align="center">
+
+<img src="icon.png" alt="SidecarTridge MV16 Emulator" width="180" />
+
+# MV16 Emulator
+
+[![Build](https://github.com/sidecartridge/md-mv16-emulator/actions/workflows/build.yml/badge.svg)](https://github.com/sidecartridge/md-mv16-emulator/actions/workflows/build.yml)
+[![Release](https://github.com/sidecartridge/md-mv16-emulator/actions/workflows/release.yml/badge.svg)](https://github.com/sidecartridge/md-mv16-emulator/actions/workflows/release.yml)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
+</div>
 
 The MV16 Emulator is a SidecarTridge Multi-device application for Atari ST/STE/Mega ST/Mega STE computers that emulates the MV16 audio device and routes its audio output through Bluetooth audio streaming. The MV-16 is a small cartridge that plugged into the expansion port of the Atari ST. It was included with the game B.A.T. and included the ability to playback sampled sounds with up to 16 voices at a time. The MV-16's use was not limited to B.A.T. and other programs could take advantage of its sound capabilities as well.
+
+> 🛒 **Get the hardware:** [SidecarTridge Multi-device](https://sidecartridge.com/products/sidecartridge-multidevice-atari-st/)
 
 ## 🚀 Installation
 
